@@ -1,0 +1,172 @@
+  ● ● ●  gesture_car_controller.html
+//gesture controlled car webpage
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT Robot Controller</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Include Paho MQTT Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js" type="text/javascript"></script>
+</head>
+<body class="bg-slate-950 text-white flex flex-col items-center justify-center min-h-screen p-6 font-sans">
+
+    <div class="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-[2.5rem] p-10 text-center shadow-2xl">
+        <div class="mb-6">
+            <h1 class="text-2xl font-black tracking-tight">ROBOT OPS</h1>
+            <p class="text-slate-500 text-[10px] uppercase tracking-[0.2em] font-bold">MQTT Satellite Control</p>
+        </div>
+
+        <!-- Connection Status -->
+        <div id="statusBox" class="mb-8 py-2 px-6 rounded-full bg-red-500/10 text-red-500 border border-red-500/20 inline-flex items-center gap-2 text-[10px] font-bold uppercase">
+            <span id="dot" class="w-2 h-2 rounded-full bg-red-500"></span>
+            <span id="statusLabel">Disconnected</span>
+        </div>
+
+        <!-- Sensor Data Visualization -->
+        <div class="grid grid-cols-2 gap-4 mb-10">
+            <div class="bg-slate-800/50 p-6 rounded-3xl border border-white/5">
+                <p class="text-[9px] text-slate-500 uppercase font-bold mb-2">Steering</p>
+                <div id="rollDisplay" class="text-3xl font-mono">-</div>
+            </div>
+            <div class="bg-slate-800/50 p-6 rounded-3xl border border-white/5">
+                <p class="text-[9px] text-slate-500 uppercase font-bold mb-2">Throttle</p>
+                <div id="pitchDisplay" class="text-3xl font-mono">-</div>
+            </div>
+        </div>
+
+        <button id="actionBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 py-5 rounded-2xl font-black text-sm transition-all active:scale-95 shadow-lg shadow-indigo-500/20 uppercase tracking-widest">
+            Initiate Control
+        </button>
+        
+        <p class="mt-6 text-[10px] text-slate-600 leading-relaxed">
+            Ensure your phone and ESP8266 are on a network with internet access to reach the MQTT broker.
+        </p>
+    </div>
+
+    <script>
+        // CONFIGURATION - MUST MATCH ARDUINO CODE
+        const MQTT_BROKER = "broker.emqx.io";
+        const MQTT_PORT = 8084; // Secure WebSocket port for EMQX
+        const MQTT_TOPIC = "my_car"; // Matched to your Arduino code
+        
+        let client;
+        let isConnected = false;
+        let lastSent = 0;
+
+        function updateStatus(connected, message) {
+            const box = document.getElementById('statusBox');
+            const dot = document.getElementById('dot');
+            const label = document.getElementById('statusLabel');
+            
+            if (connected) {
+                box.classList.replace('text-red-500', 'text-emerald-500');
+                box.classList.replace('bg-red-500/10', 'bg-emerald-500/10');
+                box.classList.replace('border-red-500/20', 'border-emerald-500/20');
+                dot.classList.replace('bg-red-500', 'bg-emerald-500');
+                label.innerText = "Active Link: EMQX";
+            } else {
+                label.innerText = message || "Disconnected";
+            } 
+        }
+
+        function initMQTT() {
+            const clientId = "WebController-" + Math.random().toString(16).substr(2, 8);
+            // ADDED: Explicitly define the "/mqtt" path required by EMQX
+            client = new Paho.MQTT.Client(MQTT_BROKER, MQTT_PORT, "/mqtt", clientId);
+
+            client.onConnectionLost = (response) => {
+                isConnected = false;
+                updateStatus(false, "Link Lost");
+                console.log("onConnectionLost: " + response.errorMessage);
+                // Reset button so user can try again
+                document.getElementById('actionBtn').disabled = false;
+                document.getElementById('actionBtn').innerText = "Initiate Control";
+            };
+
+            const options = {
+                useSSL: true, // Use secure websockets (wss://)
+                timeout: 3,   // ADDED: 3 second timeout so it doesn't hang forever
+                onSuccess: () => {
+                    isConnected = true;
+                    updateStatus(true);
+                    document.getElementById('actionBtn').innerText = "Control Active"; // ADDED: Update button on success
+                    startSensors();
+                },
+                onFailure: (err) => {
+                    updateStatus(false, "Failed to Connect");
+                    console.log("Connect failed:", err);
+                    // ADDED: Reset button so user can try again if it fails
+                    document.getElementById('actionBtn').disabled = false;
+                    document.getElementById('actionBtn').innerText = "Initiate Control";
+                }
+            };
+
+            client.connect(options);
+        }
+
+        async function startSensors() {
+            // Request permissions for iOS 13+ devices
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    const permission = await DeviceOrientationEvent.requestPermission();
+                    if (permission !== 'granted') {
+                        alert("Sensor permission denied. Please reload and allow access.");
+                        return;
+                    }
+                } catch (err) {
+                    alert("Cannot access sensors. Ensure this page is loaded via HTTPS.");
+                    console.error(err);
+                }
+            } else if (!window.DeviceOrientationEvent) {
+                alert("Device orientation not supported on this browser.");
+            }
+
+            let hasReceivedValidData = false;
+
+            window.addEventListener('deviceorientation', (e) => {
+                // If the browser blocks sensor data (e.g., not HTTPS), values will be null
+                if (e.gamma === null || e.beta === null) {
+                    if (!hasReceivedValidData) {
+                        document.getElementById('rollDisplay').innerText = "ERR";
+                        document.getElementById('pitchDisplay').innerText = "HTTPS";
+                        document.getElementById('rollDisplay').classList.add("text-red-500", "text-xl");
+                        document.getElementById('pitchDisplay').classList.add("text-red-500", "text-xl");
+                    }
+                    return;
+                }
+
+                hasReceivedValidData = true;
+                
+                // Clear error styling if data is valid
+                document.getElementById('rollDisplay').classList.remove("text-red-500", "text-xl");
+                document.getElementById('pitchDisplay').classList.remove("text-red-500", "text-xl");
+
+                const roll = Math.round(e.gamma || 0);
+                const pitch = Math.round(e.beta || 0);
+
+                document.getElementById('rollDisplay').innerText = roll + "°";
+                document.getElementById('pitchDisplay').innerText = pitch + "°";
+
+                const now = Date.now();
+                // Throttle sending to every 150ms to prevent overwhelming the broker/ESP
+                if (isConnected && now - lastSent > 150) {
+                    const message = new Paho.MQTT.Message(`${roll},${pitch}`);
+                    message.destinationName = MQTT_TOPIC;
+                    client.send(message);
+                    lastSent = now;
+                }
+            });
+        }
+
+        document.getElementById('actionBtn').addEventListener('click', () => {
+            document.getElementById('actionBtn').disabled = true;
+            document.getElementById('actionBtn').innerText = "Linking...";
+            initMQTT();
+        });
+    </script>
+</body>
+</html>
+
+
